@@ -1,11 +1,13 @@
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Union
-
 import httpx
-
 from tastytrade import API_URL, CERT_URL
 from tastytrade.utils import TastytradeError, TastytradeJsonDataclass, validate_response
+import json
+import boto3
+import logging
 
+logger = logging.getLogger(__name__)
 
 class Address(TastytradeJsonDataclass):
     """
@@ -254,189 +256,286 @@ class User(TastytradeJsonDataclass):
     nickname: Optional[str] = None
 
 
+# class Session:
+#     """
+#     Contains a local user login which can then be used to interact with the
+#     remote API.
+
+#     :param login: tastytrade username or email
+#     :param remember_me:
+#         whether or not to create a remember token to use instead of a password
+#     :param password:
+#         tastytrade password to login; if absent, remember token is required
+#     :param remember_token:
+#         previously generated token; if absent, password is required
+#     :param is_test:
+#         whether to use the test API endpoints, default False
+#     :param two_factor_authentication:
+#         if two factor authentication is enabled, this is the code sent to the
+#         user's device
+#     :param dxfeed_tos_compliant:
+#         whether to use the dxfeed TOS-compliant API endpoint for the streamer
+#     """
+
+#     def __init__(
+#         self,
+#         login: str,
+#         password: Optional[str] = None,
+#         remember_me: bool = False,
+#         remember_token: Optional[str] = None,
+#         is_test: bool = False,
+#         two_factor_authentication: Optional[str] = None,
+#         dxfeed_tos_compliant: bool = False,
+#     ):
+#         body = {"login": login, "remember-me": remember_me}
+#         if password is not None:
+#             body["password"] = password
+#         elif remember_token is not None:
+#             body["remember-token"] = remember_token
+#         else:
+#             raise TastytradeError(
+#                 "You must provide a password or remember token to log in."
+#             )
+#         #: Whether this is a cert or real session
+#         self.is_test = is_test
+#         # The headers to use for API requests
+#         headers = {
+#             "Accept": "application/json",
+#             "Content-Type": "application/json",
+#         }
+#         #: httpx client for sync requests
+#         self.sync_client = httpx.Client(
+#             base_url=(CERT_URL if is_test else API_URL), headers=headers
+#         )
+#         if two_factor_authentication is not None:
+#             response = self.sync_client.post(
+#                 "/sessions",
+#                 json=body,
+#                 headers={"X-Tastyworks-OTP": two_factor_authentication},
+#             )
+#         else:
+#             response = self.sync_client.post("/sessions", json=body)
+#         validate_response(response)  # throws exception if not 200
+
+#         json = response.json()
+#         #: The user dict returned by the API; contains basic user information
+#         self.user = User(**json["data"]["user"])
+#         #: The session token used to authenticate requests
+#         self.session_token = json["data"]["session-token"]
+#         #: A single-use token which can be used to login without a password
+#         self.remember_token = json["data"].get("remember-token")
+#         self.sync_client.headers.update({"Authorization": self.session_token})
+#         self.validate()
+#         #: httpx client for async requests
+#         self.async_client = httpx.AsyncClient(
+#             base_url=self.sync_client.base_url, headers=self.sync_client.headers.copy()
+#         )
+
+#         # Pull streamer tokens and urls
+#         url = (
+#             "/api-quote-tokens"
+#             if dxfeed_tos_compliant or is_test
+#             else "/quote-streamer-tokens"
+#         )
+#         data = self._get(url)
+#         #: Auth token for dxfeed websocket
+#         self.streamer_token = data["token"]
+#         #: URL for dxfeed websocket
+#         self.dxlink_url = data["dxlink-url"]
+
+#     async def _a_get(self, url, **kwargs) -> Dict[str, Any]:
+#         response = await self.async_client.get(url, timeout=30, **kwargs)
+#         return self._validate_and_parse(response)
+
+#     def _get(self, url, **kwargs) -> Dict[str, Any]:
+#         response = self.sync_client.get(url, timeout=30, **kwargs)
+#         return self._validate_and_parse(response)
+
+#     async def _a_delete(self, url, **kwargs) -> None:
+#         response = await self.async_client.delete(url, **kwargs)
+#         validate_response(response)
+
+#     def _delete(self, url, **kwargs) -> None:
+#         response = self.sync_client.delete(url, **kwargs)
+#         validate_response(response)
+
+#     async def _a_post(self, url, **kwargs) -> Dict[str, Any]:
+#         response = await self.async_client.post(url, **kwargs)
+#         return self._validate_and_parse(response)
+
+#     def _post(self, url, **kwargs) -> Dict[str, Any]:
+#         response = self.sync_client.post(url, **kwargs)
+#         return self._validate_and_parse(response)
+
+#     async def _a_put(self, url, **kwargs) -> Dict[str, Any]:
+#         response = await self.async_client.put(url, **kwargs)
+#         return self._validate_and_parse(response)
+
+#     def _put(self, url, **kwargs) -> Dict[str, Any]:
+#         response = self.sync_client.put(url, **kwargs)
+#         return self._validate_and_parse(response)
+
+#     def _validate_and_parse(self, response: httpx._models.Response) -> Dict[str, Any]:
+#         validate_response(response)
+#         return response.json()["data"]
+
+#     async def a_validate(self) -> bool:
+#         """
+#         Validates the current session by sending a request to the API.
+
+#         :return: True if the session is valid and False otherwise.
+#         """
+#         response = await self.async_client.post("/sessions/validate")
+#         return response.status_code // 100 == 2
+
+#     def validate(self) -> bool:
+#         """
+#         Validates the current session by sending a request to the API.
+
+#         :return: True if the session is valid and False otherwise.
+#         """
+#         response = self.sync_client.post("/sessions/validate")
+#         return response.status_code // 100 == 2
+
+#     async def a_destroy(self) -> None:
+#         """
+#         Sends a API request to log out of the existing session. This will
+#         invalidate the current session token and login.
+#         """
+#         await self._a_delete("/sessions")
+
+#     def destroy(self) -> None:
+#         """
+#         Sends a API request to log out of the existing session. This will
+#         invalidate the current session token and login.
+#         """
+#         self._delete("/sessions")
+
+#     async def a_get_customer(self) -> Customer:
+#         """
+#         Gets the customer dict from the API.
+
+#         :return: a Tastytrade 'Customer' object in JSON format.
+#         """
+#         data = await self._a_get("/customers/me")
+#         return Customer(**data)
+
+#     def get_customer(self) -> Customer:
+#         """
+#         Gets the customer dict from the API.
+
+#         :return: a Tastytrade 'Customer' object in JSON format.
+#         """
+#         data = self._get("/customers/me")
+#         return Customer(**data)
+
+#     async def a_get_2fa_info(self) -> TwoFactorInfo:
+#         """
+#         Gets the 2FA info for the current user.
+#         """
+#         data = await self._a_get("/users/me/two-factor-method")
+#         return TwoFactorInfo(**data)
+
+#     def get_2fa_info(self) -> TwoFactorInfo:
+#         """
+#         Gets the 2FA info for the current user.
+#         """
+#         data = self._get("/users/me/two-factor-method")
+#         return TwoFactorInfo(**data)
+
 class Session:
-    """
-    Contains a local user login which can then be used to interact with the
-    remote API.
+    SSM_SESSION_PARAM_NAME = '/tastytrade/session_data'
+    SSM_CREDENTIALS_PARAM_NAME = '/tastytrade/credentials'
 
-    :param login: tastytrade username or email
-    :param remember_me:
-        whether or not to create a remember token to use instead of a password
-    :param password:
-        tastytrade password to login; if absent, remember token is required
-    :param remember_token:
-        previously generated token; if absent, password is required
-    :param is_test:
-        whether to use the test API endpoints, default False
-    :param two_factor_authentication:
-        if two factor authentication is enabled, this is the code sent to the
-        user's device
-    :param dxfeed_tos_compliant:
-        whether to use the dxfeed TOS-compliant API endpoint for the streamer
-    """
+    def __init__(self):
+        logger.debug("Initializing session")
+        self.base_url = API_URL
+        self.ssm = boto3.client('ssm')
+        credentials = json.loads(self.ssm.get_parameter(Name=self.SSM_CREDENTIALS_PARAM_NAME, WithDecryption=True)['Parameter']['Value'])
+        
 
-    def __init__(
-        self,
-        login: str,
-        password: Optional[str] = None,
-        remember_me: bool = False,
-        remember_token: Optional[str] = None,
-        is_test: bool = False,
-        two_factor_authentication: Optional[str] = None,
-        dxfeed_tos_compliant: bool = False,
-    ):
-        body = {"login": login, "remember-me": remember_me}
-        if password is not None:
-            body["password"] = password
-        elif remember_token is not None:
-            body["remember-token"] = remember_token
-        else:
-            raise TastytradeError(
-                "You must provide a password or remember token to log in."
-            )
-        #: Whether this is a cert or real session
-        self.is_test = is_test
-        # The headers to use for API requests
+        logger.debug("Attempting to retrieve cached session data")
+        try:
+            session_data_str = self.ssm.get_parameter(Name=self.SSM_SESSION_PARAM_NAME, WithDecryption=True)['Parameter']['Value']
+            session_data = json.loads(session_data_str)
+            logger.debug("cached session data found")
+        except self.ssm.exceptions.ParameterNotFound:
+            logger.debug("no cached session data found")
+            session_data = {}
+
+        # try to initialize from session data
+        self.session_token = session_data.get('session_token')
+        self.streamer_token = session_data.get('streamer_token')
+        self.dxlink_url = session_data.get('dxlink_url')
+
         headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
+            "accept": "application/json",
+            "content-type": "application/json",
         }
-        #: httpx client for sync requests
-        self.sync_client = httpx.Client(
-            base_url=(CERT_URL if is_test else API_URL), headers=headers
-        )
-        if two_factor_authentication is not None:
-            response = self.sync_client.post(
-                "/sessions",
-                json=body,
-                headers={"X-Tastyworks-OTP": two_factor_authentication},
-            )
+        if self.session_token:
+            headers["authorization"] = self.session_token
+        self.headers = headers
+        self.sync_client = httpx.Client(base_url=API_URL, headers=headers)
+
+        if not self.session_token:
+            logger.info("no session token found, performing full initialization")
+            self._full_init(credentials)
+        elif not self.validate():
+            logger.info("session token invalid, performing full initialization")
+            self._full_init(credentials)
         else:
-            response = self.sync_client.post("/sessions", json=body)
-        validate_response(response)  # throws exception if not 200
+            logger.info("using cached session data")
 
-        json = response.json()
-        #: The user dict returned by the API; contains basic user information
-        self.user = User(**json["data"]["user"])
-        #: The session token used to authenticate requests
-        self.session_token = json["data"]["session-token"]
-        #: A single-use token which can be used to login without a password
-        self.remember_token = json["data"].get("remember-token")
-        self.sync_client.headers.update({"Authorization": self.session_token})
-        self.validate()
-        #: httpx client for async requests
-        self.async_client = httpx.AsyncClient(
-            base_url=self.sync_client.base_url, headers=self.sync_client.headers.copy()
-        )
+    def _full_init(self, credentials):
+        logger.debug("starting full initialization")
+        body = {
+            "login": credentials['username'],
+            "password": credentials['password']
+        }
+        response = self.sync_client.post("/sessions", json=body)
+        validate_response(response)
 
-        # Pull streamer tokens and urls
-        url = (
-            "/api-quote-tokens"
-            if dxfeed_tos_compliant or is_test
-            else "/quote-streamer-tokens"
-        )
-        data = self._get(url)
-        #: Auth token for dxfeed websocket
+        json_data = response.json()
+        # self.user = user(**json_data["data"]["user"])
+        self.session_token = json_data["data"]["session-token"]
+        self.sync_client.headers.update({"authorization": self.session_token})
+
+        logger.debug("session created, retrieving streamer token")
+        data = self._get("/quote-streamer-tokens")
         self.streamer_token = data["token"]
-        #: URL for dxfeed websocket
         self.dxlink_url = data["dxlink-url"]
 
-    async def _a_get(self, url, **kwargs) -> Dict[str, Any]:
-        response = await self.async_client.get(url, timeout=30, **kwargs)
-        return self._validate_and_parse(response)
+        logger.debug("caching session data")
+        session_data_str = json.dumps({
+            'session_token': self.session_token,
+            'streamer_token': self.streamer_token,
+            'dxlink_url': self.dxlink_url,
+            # 'user': self.user.dict() if self.user else none,
+        })
+        self.ssm.put_parameter(Name=self.SSM_SESSION_PARAM_NAME, Value=session_data_str, Type='SecureString', Overwrite=True)
+        logger.debug("full initialization complete")
 
-    def _get(self, url, **kwargs) -> Dict[str, Any]:
+    def validate(self):
+        logger.debug("validating session")
+        response = self.sync_client.post("/sessions/validate")
+        is_valid = response.status_code == 200 or response.status_code == 201 # gets 201 for some reason
+        logger.debug(f"session is {'valid' if is_valid else 'invalid'}")
+        return is_valid
+
+    def _get(self, url, **kwargs):
+        logger.info(f"making get request to {url}")
         response = self.sync_client.get(url, timeout=30, **kwargs)
-        return self._validate_and_parse(response)
-
-    async def _a_delete(self, url, **kwargs) -> None:
-        response = await self.async_client.delete(url, **kwargs)
         validate_response(response)
+        return response.json()["data"]
 
     def _delete(self, url, **kwargs) -> None:
         response = self.sync_client.delete(url, **kwargs)
         validate_response(response)
 
-    async def _a_post(self, url, **kwargs) -> Dict[str, Any]:
-        response = await self.async_client.post(url, **kwargs)
-        return self._validate_and_parse(response)
-
     def _post(self, url, **kwargs) -> Dict[str, Any]:
         response = self.sync_client.post(url, **kwargs)
-        return self._validate_and_parse(response)
-
-    async def _a_put(self, url, **kwargs) -> Dict[str, Any]:
-        response = await self.async_client.put(url, **kwargs)
-        return self._validate_and_parse(response)
-
-    def _put(self, url, **kwargs) -> Dict[str, Any]:
-        response = self.sync_client.put(url, **kwargs)
         return self._validate_and_parse(response)
 
     def _validate_and_parse(self, response: httpx._models.Response) -> Dict[str, Any]:
         validate_response(response)
         return response.json()["data"]
-
-    async def a_validate(self) -> bool:
-        """
-        Validates the current session by sending a request to the API.
-
-        :return: True if the session is valid and False otherwise.
-        """
-        response = await self.async_client.post("/sessions/validate")
-        return response.status_code // 100 == 2
-
-    def validate(self) -> bool:
-        """
-        Validates the current session by sending a request to the API.
-
-        :return: True if the session is valid and False otherwise.
-        """
-        response = self.sync_client.post("/sessions/validate")
-        return response.status_code // 100 == 2
-
-    async def a_destroy(self) -> None:
-        """
-        Sends a API request to log out of the existing session. This will
-        invalidate the current session token and login.
-        """
-        await self._a_delete("/sessions")
-
-    def destroy(self) -> None:
-        """
-        Sends a API request to log out of the existing session. This will
-        invalidate the current session token and login.
-        """
-        self._delete("/sessions")
-
-    async def a_get_customer(self) -> Customer:
-        """
-        Gets the customer dict from the API.
-
-        :return: a Tastytrade 'Customer' object in JSON format.
-        """
-        data = await self._a_get("/customers/me")
-        return Customer(**data)
-
-    def get_customer(self) -> Customer:
-        """
-        Gets the customer dict from the API.
-
-        :return: a Tastytrade 'Customer' object in JSON format.
-        """
-        data = self._get("/customers/me")
-        return Customer(**data)
-
-    async def a_get_2fa_info(self) -> TwoFactorInfo:
-        """
-        Gets the 2FA info for the current user.
-        """
-        data = await self._a_get("/users/me/two-factor-method")
-        return TwoFactorInfo(**data)
-
-    def get_2fa_info(self) -> TwoFactorInfo:
-        """
-        Gets the 2FA info for the current user.
-        """
-        data = self._get("/users/me/two-factor-method")
-        return TwoFactorInfo(**data)
